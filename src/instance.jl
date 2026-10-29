@@ -186,3 +186,10 @@ function saturate(X::Instance{I}, seed::Span{I}) where {I}
     xadj[nu + one(I)] = q
     return Span{I}(nu, nv, ne, xadj, adjncy)
 end
+
+#
+# The image of y under arc a, for Y normalized.
+#
+function image(Y::Instance{I}, y::I, a::I) where {I}
+    return Y.dom.adjncy[Y.dom.xadj[y] + a - Y.cod.xadj[Y.vtx[y]]]
+end

@@ -24,6 +24,8 @@ include("instance.jl")
 include("contraction.jl")
 include("decomposition.jl")
 include("color.jl")
+include("eager.jl")
+include("lazy.jl")
 
 greet() = print("Hello World!")
 

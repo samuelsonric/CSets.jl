@@ -493,8 +493,3 @@ function bagsizes(D::Decomposition{I}) where {I}
 
     return mbag, mchd, msep, medg
 end
-
-function ContractionWorkspace(D::Decomposition{I}) where {I}
-    mbag, mchd, msep, medg = bagsizes(D)
-    return ContractionWorkspace{I}(mbag, mchd, msep, medg)
-end

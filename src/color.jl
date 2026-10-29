@@ -9,28 +9,33 @@
 # images, and score computes the sum of the weights of all
 # homomorphisms X -> Y.
 #
+# The strategy is Eager or Lazy. The eager search computes, at each
+# node, the table of every separator assignment that extends into the
+# subtree, children first. The lazy search asks each child only about
+# the separator assignments its parent reaches, and stops at the first
+# homomorphism. The lazy search requires the Boolean semiring.
 #
-# The local problem at each node is solved by f!, which takes the
-# arguments of contract! without the workspace. For a witness, the
-# backward step at each node is g!, which takes the arguments of lift!.
-# By default, f! is contract! and g! is lift!.
+@enum Strategy Eager Lazy
+
 #
-function score(R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; kw...) where {I}
+# The default strategy: Lazy for the Boolean semiring, and Eager
+# otherwise.
+#
+function default_strategy(R::AbstractSemiring)
+    if R isa Boolean
+        return Lazy
+    else
+        return Eager
+    end
+end
+
+function score(R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; strategy::Strategy = default_strategy(R), kw...) where {I}
     D = decomposition(X, S; kw...)
-    return score(R, W, D, Y)
+    return score(R, W, D, Y; strategy)
 end
 
-function score(R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}) where {I}
-    return score(kernel(ContractionWorkspace(D)), R, W, D, Y)
-end
-
-function score(f!, R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; kw...) where {I}
-    D = decomposition(X, S; kw...)
-    return score(f!, R, W, D, Y)
-end
-
-function score(f!, R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}) where {I}
-    value, h = solve(f!, nothing, R, W, D, Y, valtype(R, W))
+function score(R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}; strategy::Strategy = default_strategy(R)) where {I}
+    value, h = solve(R, W, D, Y, strategy, false)
     return value
 end
 
@@ -38,23 +43,14 @@ end
 # Find the score and a homomorphism attaining it, or nothing if the
 # score is 0. The semiring must be selective.
 #
-function color(R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; kw...) where {I}
+function color(R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; strategy::Strategy = default_strategy(R), kw...) where {I}
     D = decomposition(X, S; kw...)
-    return color(R, W, D, Y)
+    return color(R, W, D, Y; strategy)
 end
 
-function color(R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}) where {I}
-    return color(kernel(ContractionWorkspace(D)), lift!, R, W, D, Y)
-end
-
-function color(f!, g!, R::AbstractSemiring, W, X::Instance{I}, S::Span{I}, Y::Instance{I}; kw...) where {I}
-    D = decomposition(X, S; kw...)
-    return color(f!, g!, R, W, D, Y)
-end
-
-function color(f!, g!, R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}) where {I}
+function color(R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}; strategy::Strategy = default_strategy(R)) where {I}
     @assert isselective(R)
-    return solve(f!, g!, R, W, D, Y, valtype(R, W))
+    return solve(R, W, D, Y, strategy, true)
 end
 
 #
@@ -69,13 +65,13 @@ function color(X::Instance{I}, S::Span{I}, Y::Instance{I}; kw...) where {I}
     return color(nothing, X, S, Y; kw...)
 end
 
-function color(W, D::Decomposition{I}, Y::Instance{I}) where {I}
-    value, h = color(Boolean(), W, D, Y)
+function color(W, D::Decomposition{I}, Y::Instance{I}; kw...) where {I}
+    value, h = color(Boolean(), W, D, Y; kw...)
     return h
 end
 
-function color(D::Decomposition{I}, Y::Instance{I}) where {I}
-    return color(nothing, D, Y)
+function color(D::Decomposition{I}, Y::Instance{I}; kw...) where {I}
+    return color(nothing, D, Y; kw...)
 end
 
 #
@@ -93,33 +89,32 @@ function valtype(R::AbstractSemiring, W)
 end
 
 #
-# The default local problem: contract! with the workspace work.
+# Relabel Y and the weights, and search with the strategy. Unless
+# witness is false, also find a homomorphism attaining the score.
 #
-function kernel(work::ContractionWorkspace)
-    return function (R, C, Y, pre, base, typ, xwgt, wgt, ckey, cval, ccol, key, val, okey, oval, ko, vo, fac, fo)
-        return contract!(R, C, Y, pre, base, typ, xwgt, wgt, ckey, cval, ccol, key, val, okey, oval, ko, vo, fac, fo, work)
-    end
-end
-
-#
-# Search with the local problem f! and, unless g! is nothing, find a
-# witness with the backward step g!.
-#
-function solve(f!, g!, R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}, ::Type{T}) where {I, T}
+function solve(R::AbstractSemiring, W, D::Decomposition{I}, Y::Instance{I}, strategy::Strategy, witness::Bool) where {I}
     Y, yord = normalize(Y)
     typ = invvtx(Y)
     base, pre = preimages(Y, typ)
-    xwgt, wgt = weights(W, D, typ, T)
+    xwgt, wgt = weights(W, D, typ, valtype(R, W))
+
+    if strategy == Lazy
+        if !(R isa Boolean)
+            throw(ArgumentError("the lazy strategy requires the Boolean semiring"))
+        end
+
+        return lazy(R, D, Y, yord, pre, base, typ, xwgt, wgt, witness)
+    end
     #
     # the factor (back-pointers) is kept only for a witness
     #
-    if !isnothing(g!)
+    if witness
         fac = Vector{I}(undef, 1024)
     else
         fac = nothing
     end
 
-    return solve(f!, g!, R, D, Y, yord, pre, base, typ, xwgt, wgt, fac)
+    return eager(R, D, Y, yord, pre, base, typ, xwgt, wgt, fac)
 end
 
 #
@@ -266,275 +261,6 @@ function weights(W, D::Decomposition{I}, typ::Span{I}, ::Type{T}) where {I, T}
 end
 
 #
-# Allocate the workspaces and run the forward pass and, for a witness,
-# the backward pass. The weights xwgt, wgt and the factor fac are
-# either vectors or nothing, and this function is compiled separately
-# for each.
-#
-# The forward pass visits the nodes in postorder. At each node, the
-# decomposition is restricted to a contraction, the arguments (the
-# children's tables, in place, and the weights of the bag, copied) are
-# gathered, and the local problem is solved by f!. The tables live on
-# a stack: the children's tables are on top, the table of the node is
-# written above them and then moved down over them. For a witness, f!
-# also writes back-pointers to the factor.
-#
-# The backward pass visits the nodes from the root. At each node, the
-# separator is assigned by the ancestors, and g! reads the
-# back-pointers to assign the residual and choose a column for each
-# child.
-#
-function solve(
-        f!,
-        g!,
-        R::AbstractSemiring,
-        D::Decomposition{I},
-        Y::Instance{I},
-        yord::AbstractVector{I},
-        pre::Span{I},
-        base::AbstractVector{I},
-        typ::Span{I},
-        xwgt,
-        wgt,
-        fac,
-    ) where {I}
-    if isnothing(wgt)
-        T = valtype(R)
-    else
-        T = eltype(wgt)
-    end
-
-    nu = D.inst.dom.nu
-    nt = D.tree.nu
-    mbag, mchd, msep, medg = bagsizes(D)
-    #
-    # the contraction
-    #
-    pos     = FVector{I}(undef, nu)
-    xadj    = FVector{I}(undef, mbag + one(I))
-    adjncy  = FVector{I}(undef, medg)
-    vtx     = FVector{I}(undef, mbag)
-    arc     = FVector{I}(undef, medg)
-    sxadj   = FVector{I}(undef, mchd + one(I))
-    sadjncy = FVector{I}(undef, msep)
-    #
-    # the arguments
-    #
-    ckey = FVector{I}(undef, mchd)
-    cval = FVector{I}(undef, mchd)
-    ccol = FVector{I}(undef, mchd)
-
-    if isnothing(wgt)
-        lxwgt = lwgt = nothing
-    else
-        lxwgt = FVector{I}(undef, mbag + one(I))
-        lwgt  = Vector{T}(undef, 1024)
-    end
-    #
-    # the backward step
-    #
-    hloc = FVector{I}(undef, mbag)
-    sel  = FVector{I}(undef, mchd)
-    #
-    # the stack of tables: the table of node t has ncol[t] columns,
-    # with keys tab[xtab[t]] ... and values tval[vtab[t]] ...
-    #
-    xtab = FVector{I}(undef, nt)
-    vtab = FVector{I}(undef, nt)
-    ncol = FVector{I}(undef, nt)
-    tab  = Vector{I}(undef, 1024)
-    tval = Vector{T}(undef, 1024)
-    ntab = zero(I)
-    nval = zero(I)
-    #
-    # the factor: the back-pointers of node t follow fac[xfac[t]]
-    #
-    if isnothing(fac)
-        xfac = nothing
-    else
-        xfac = FVector{I}(undef, nt)
-    end
-
-    nfac = zero(I)
-
-    for t in oneto(nt)
-        C = restrict!(D, pos, xadj, adjncy, vtx, arc, sxadj, sadjncy, t)
-        lwgt = gather!(D, xtab, vtab, ncol, xwgt, wgt, ckey, cval, ccol, lxwgt, lwgt, t)
-        n, nf = f!(R, C, Y, pre, base, typ, lxwgt, lwgt, ckey, cval, ccol, tab, tval, tab, tval, ntab, nval, fac, nfac)
-
-        if iszero(n)
-            return szero(R, T), nothing
-        end
-        #
-        # pop the children's tables and move the table down over them
-        #
-        s = C.inst.dom.nu - C.nr
-        kb = ntab
-        vb = nval
-
-        if ispositive(C.sep.nu)
-            c = D.tree.adjncy[D.tree.xadj[t]]
-            kb = xtab[c] - one(I)
-            vb = vtab[c] - one(I)
-        end
-
-        for i in oneto(n * s)
-            tab[kb + i] = tab[ntab + i]
-        end
-
-        if !(R isa Boolean)
-            for i in oneto(n)
-                tval[vb + i] = tval[nval + i]
-            end
-        end
-
-        xtab[t] = kb + one(I)
-        vtab[t] = vb + one(I)
-        ncol[t] = n
-        ntab = kb + n * s
-
-        if !(R isa Boolean)
-            nval = vb + n
-        end
-
-        if !isnothing(fac)
-            xfac[t] = nfac
-            nfac += nf
-        end
-    end
-    #
-    # in the Boolean semiring every stored entry has value 1, so values
-    # are not stored
-    #
-    if R isa Boolean
-        value = sone(R, T)
-    else
-        value = tval[vtab[nt]]
-    end
-
-    if isnothing(fac)
-        return value, nothing
-    end
-    #
-    # the backward pass: h is the assignment, and ncol[t] becomes the
-    # choice for node t made by its parent
-    #
-    h = FVector{I}(undef, nu)
-    ncol[nt] = one(I)
-
-    for t in nt:-one(I):one(I)
-        C = restrict!(D, pos, xadj, adjncy, vtx, arc, sxadj, sadjncy, t)
-        nr = C.nr
-        rstrt = D.res.xadj[t]
-        sstrt = D.sep.xadj[t]
-        cstrt = D.tree.xadj[t]
-        #
-        # the separator is assigned by the ancestors
-        #
-        for x in nr + one(I):C.inst.dom.nu
-            hloc[x] = h[D.sep.adjncy[sstrt + x - nr - one(I)]]
-        end
-
-        g!(C, fac, xfac[t], hloc, ncol[t], sel)
-
-        for x in oneto(nr)
-            h[rstrt + x - one(I)] = hloc[x]
-        end
-
-        for j in oneto(C.sep.nu)
-            ncol[D.tree.adjncy[cstrt + j - one(I)]] = sel[j]
-        end
-    end
-
-    out = FVector{I}(undef, nu)
-
-    for r in oneto(nu)
-        out[D.res.adjncy[r]] = yord[h[r]]
-    end
-
-    return value, out
-end
-
-#
-# The arguments of the local problem at node t: the table of each
-# child j, with ccol[j] columns, keys tab[ckey[j]] ... and values
-# tval[cval[j]] ..., read in place; and the weights of each element x
-# of the bag
-#
-#    lwgt[lxwgt[x]] ... lwgt[lxwgt[x + 1] - 1],
-#
-# copied. Returns the weights, which grow geometrically.
-#
-function gather!(
-        D::Decomposition{I},
-        xtab::AbstractVector{I},
-        vtab::AbstractVector{I},
-        ncol::AbstractVector{I},
-        xwgt,
-        wgt,
-        ckey::AbstractVector{I},
-        cval::AbstractVector{I},
-        ccol::AbstractVector{I},
-        lxwgt,
-        lwgt,
-        t::I,
-    ) where {I}
-    cstrt = D.tree.xadj[t]
-    cstop = D.tree.xadj[t + one(I)] - one(I)
-    #
-    # the tables
-    #
-    for j in oneto(cstop - cstrt + one(I))
-        c = D.tree.adjncy[cstrt + j - one(I)]
-        ckey[j] = xtab[c]
-        cval[j] = vtab[c]
-        ccol[j] = ncol[c]
-    end
-    #
-    # the weights
-    #
-    if !isnothing(wgt)
-        rstrt = D.res.xadj[t]
-        rstop = D.res.xadj[t + one(I)] - one(I)
-        sstrt = D.sep.xadj[t]
-        nr = rstop - rstrt + one(I)
-        m = nr + D.sep.xadj[t + one(I)] - sstrt
-        lxwgt[one(I)] = one(I)
-
-        for x in oneto(m)
-            if x <= nr
-                g = rstrt + x - one(I)
-            else
-                g = D.sep.adjncy[sstrt + x - nr - one(I)]
-            end
-
-            lxwgt[x + one(I)] = lxwgt[x] + xwgt[g + one(I)] - xwgt[g]
-        end
-
-        if length(lwgt) < lxwgt[m + one(I)] - one(I)
-            lwgt = Vector{eltype(wgt)}(undef, max(2 * length(lwgt), lxwgt[m + one(I)] - one(I)))
-        end
-
-        for x in oneto(m)
-            if x <= nr
-                g = rstrt + x - one(I)
-            else
-                g = D.sep.adjncy[sstrt + x - nr - one(I)]
-            end
-
-            l = lxwgt[x] - xwgt[g]
-
-            for i in xwgt[g]:xwgt[g + one(I)] - one(I)
-                lwgt[l + i] = wgt[i]
-            end
-        end
-    end
-
-    return lwgt
-end
-
-
-#
 # Relabel Y so that its elements are grouped by type and each
 # element's edges are listed in schema order. Returns the relabeled
 # instance and the permutation from new labels to old.
@@ -564,11 +290,4 @@ function normalize(Y::Instance{I}) where {I}
 
     dom = Span{I}(ny, ny, nf, Z.dom.xadj, adjncy)
     return Instance{I}(dom, Z.cod, Z.vtx, arc), order
-end
-
-#
-# The image of y under arc a, for Y normalized.
-#
-function image(Y::Instance{I}, y::I, a::I) where {I}
-    return Y.dom.adjncy[Y.dom.xadj[y] + a - Y.cod.xadj[Y.vtx[y]]]
 end
